@@ -1,0 +1,43 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) buffer VertexBuffer {
+	float data[];
+} vertex_buffer;
+
+layout(set = 0, binding = 1, std430) buffer AttributeBuffer {
+	float data[];
+} attribute_buffer;
+
+layout(set = 0, binding = 2, std430) buffer IndexBuffer {
+	uint data[];
+} index_buffer;
+
+layout(set = 0, binding = 3, std430) buffer IndirectCommandBuffer {
+	uint index_count;
+	uint instance_count;
+	uint first_index;
+	int vertex_offset;
+	uint first_instance;
+	uint vertex_allocator;
+} command_buffer;
+
+layout(push_constant, std430) uniform Params {
+	float time;
+	float width;
+	float trail_length;
+	float _pad0;
+	uint num_segments;
+	uint num_ribbons;
+	uint max_vertices;
+	uint max_indices;
+	float cam_x;
+	float cam_y;
+	float cam_z;
+	float _pad2;
+	uint _pad3;
+	uint _pad4;
+	uint _pad5;
+	uint _pad6;
+} params;

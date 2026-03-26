@@ -1,0 +1,149 @@
+vec3 field_gradient(vec3 p) {
+	vec2 e = vec2(params.gradient_step, 0.0);
+	float dx = sample_field(p + vec3(e.x, e.y, e.y)) - sample_field(p - vec3(e.x, e.y, e.y));
+	float dy = sample_field(p + vec3(e.y, e.x, e.y)) - sample_field(p - vec3(e.y, e.x, e.y));
+	float dz = sample_field(p + vec3(e.y, e.y, e.x)) - sample_field(p - vec3(e.y, e.y, e.x));
+	vec3 gradient = vec3(dx, dy, dz);
+	if (dot(gradient, gradient) < 1e-7) {
+		return vec3(0.0, 1.0, 0.0);
+	}
+	return normalize(gradient);
+}
+
+vec3 iso_lerp(vec3 a, vec3 b, float av, float bv) {
+	float denom = bv - av;
+	float t = abs(denom) < 0.00001 ? 0.5 : (params.iso_level - av) / denom;
+	return mix(a, b, clamp(t, 0.0, 1.0));
+}
+
+void write_vertex(uint vertex_index, vec3 vertex_position) {
+	uint base = vertex_index * 3u;
+	vertex_buffer.data[base + 0u] = vertex_position.x;
+	vertex_buffer.data[base + 1u] = vertex_position.y;
+	vertex_buffer.data[base + 2u] = vertex_position.z;
+}
+
+void write_normal(uint vertex_index, vec3 vertex_normal) {
+	uint base = vertex_index * 3u;
+	attribute_buffer.data[base + 0u] = vertex_normal.x;
+	attribute_buffer.data[base + 1u] = vertex_normal.y;
+	attribute_buffer.data[base + 2u] = vertex_normal.z;
+}
+
+void orient_triangle(inout vec3 a, inout vec3 b, inout vec3 c) {
+	vec3 face_normal = cross(b - a, c - a);
+	vec3 outward_normal = -field_gradient((a + b + c) / 3.0);
+	if (dot(face_normal, outward_normal) < 0.0) {
+		vec3 tmp = b;
+		b = c;
+		c = tmp;
+	}
+}
+
+void emit_triangle(vec3 a, vec3 b, vec3 c) {
+	orient_triangle(a, b, c);
+	uint first_vertex = atomicAdd(command_buffer.vertex_allocator, 3u);
+	uint first_index = atomicAdd(command_buffer.index_count, 3u);
+
+	if (first_vertex + 3u > params.limits.x || first_index + 3u > params.limits.y) {
+		atomicMin(command_buffer.vertex_allocator, params.limits.x);
+		atomicMin(command_buffer.index_count, params.limits.y);
+		return;
+	}
+
+	write_vertex(first_vertex + 0u, a);
+	write_vertex(first_vertex + 1u, b);
+	write_vertex(first_vertex + 2u, c);
+	write_normal(first_vertex + 0u, field_gradient(a));
+	write_normal(first_vertex + 1u, field_gradient(b));
+	write_normal(first_vertex + 2u, field_gradient(c));
+	index_buffer.data[first_index + 0u] = first_vertex + 0u;
+	index_buffer.data[first_index + 1u] = first_vertex + 2u;
+	index_buffer.data[first_index + 2u] = first_vertex + 1u;
+}
+
+void emit_tetra(vec3 p0, float v0, vec3 p1, float v1, vec3 p2, float v2, vec3 p3, float v3) {
+	bool in0 = v0 >= params.iso_level;
+	bool in1 = v1 >= params.iso_level;
+	bool in2 = v2 >= params.iso_level;
+	bool in3 = v3 >= params.iso_level;
+	int inside_count = int(in0) + int(in1) + int(in2) + int(in3);
+	if (inside_count == 0 || inside_count == 4) {
+		return;
+	}
+
+	if (inside_count == 1 || inside_count == 3) {
+		bool flip = inside_count == 3;
+		vec3 inside_pos = vec3(0.0);
+		float inside_value = 0.0;
+		vec3 outside_pos[3];
+		float outside_value[3];
+		int outside_index = 0;
+		bool select0 = flip ? !in0 : in0;
+		bool select1 = flip ? !in1 : in1;
+		bool select2 = flip ? !in2 : in2;
+		bool select3 = flip ? !in3 : in3;
+
+		if (select0) { inside_pos = p0; inside_value = v0; } else { outside_pos[outside_index] = p0; outside_value[outside_index++] = v0; }
+		if (select1) { inside_pos = p1; inside_value = v1; } else { outside_pos[outside_index] = p1; outside_value[outside_index++] = v1; }
+		if (select2) { inside_pos = p2; inside_value = v2; } else { outside_pos[outside_index] = p2; outside_value[outside_index++] = v2; }
+		if (select3) { inside_pos = p3; inside_value = v3; } else { outside_pos[outside_index] = p3; outside_value[outside_index++] = v3; }
+
+		vec3 a = iso_lerp(inside_pos, outside_pos[0], inside_value, outside_value[0]);
+		vec3 b = iso_lerp(inside_pos, outside_pos[1], inside_value, outside_value[1]);
+		vec3 c = iso_lerp(inside_pos, outside_pos[2], inside_value, outside_value[2]);
+		if (flip) {
+			emit_triangle(a, c, b);
+		} else {
+			emit_triangle(a, b, c);
+		}
+		return;
+	}
+
+	vec3 inside_pos[2];
+	float inside_value[2];
+	vec3 outside_pos[2];
+	float outside_value[2];
+	int inside_index = 0;
+	int outside_index = 0;
+
+	if (in0) { inside_pos[inside_index] = p0; inside_value[inside_index++] = v0; } else { outside_pos[outside_index] = p0; outside_value[outside_index++] = v0; }
+	if (in1) { inside_pos[inside_index] = p1; inside_value[inside_index++] = v1; } else { outside_pos[outside_index] = p1; outside_value[outside_index++] = v1; }
+	if (in2) { inside_pos[inside_index] = p2; inside_value[inside_index++] = v2; } else { outside_pos[outside_index] = p2; outside_value[outside_index++] = v2; }
+	if (in3) { inside_pos[inside_index] = p3; inside_value[inside_index++] = v3; } else { outside_pos[outside_index] = p3; outside_value[outside_index++] = v3; }
+
+	vec3 a = iso_lerp(inside_pos[0], outside_pos[0], inside_value[0], outside_value[0]);
+	vec3 b = iso_lerp(inside_pos[0], outside_pos[1], inside_value[0], outside_value[1]);
+	vec3 c = iso_lerp(inside_pos[1], outside_pos[0], inside_value[1], outside_value[0]);
+	vec3 d = iso_lerp(inside_pos[1], outside_pos[1], inside_value[1], outside_value[1]);
+	emit_triangle(a, c, d);
+	emit_triangle(a, d, b);
+}
+
+void main() {
+	uvec3 cell = gl_GlobalInvocationID.xyz;
+	if (cell.x >= params.cells_x || cell.y >= params.cells_y || cell.z >= params.cells_z) {
+		return;
+	}
+
+	vec3 min_corner = params.surface_offset_phase.xyz + vec3(-params.extent);
+	vec3 cell_size = (vec3(params.extent) * 2.0) / vec3(params.cells_x, params.cells_y, params.cells_z);
+	vec3 corner_pos[8];
+	float corner_val[8];
+
+	for (int i = 0; i < 8; i++) {
+		vec3 p = min_corner + vec3(cell + uvec3(CUBE_CORNERS[i])) * cell_size;
+		corner_pos[i] = p;
+		corner_val[i] = sample_field(p);
+	}
+
+	for (int tetra = 0; tetra < 6; tetra++) {
+		ivec4 t = TETRAHEDRA[tetra];
+		emit_tetra(
+			corner_pos[t.x], corner_val[t.x],
+			corner_pos[t.y], corner_val[t.y],
+			corner_pos[t.z], corner_val[t.z],
+			corner_pos[t.w], corner_val[t.w]
+		);
+	}
+}

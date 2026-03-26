@@ -1,0 +1,52 @@
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) buffer VertexBuffer {
+	float data[];
+} vertex_buffer;
+
+layout(set = 0, binding = 1, std430) buffer AttributeBuffer {
+	float data[];
+} attribute_buffer;
+
+layout(set = 0, binding = 2, std430) buffer IndexBuffer {
+	uint data[];
+} index_buffer;
+
+layout(set = 0, binding = 3, std430) buffer IndirectCommandBuffer {
+	uint index_count;
+	uint instance_count;
+	uint first_index;
+	int vertex_offset;
+	uint first_instance;
+	uint vertex_allocator;
+} command_buffer;
+
+layout(push_constant, std430) uniform Params {
+	float time;
+	float grid_spacing;
+	float inner_clip_half;
+	float _pad1;
+	uint res_x;
+	uint res_y;
+	uint _pad2;
+	uint _pad3;
+	float snap_x;
+	float snap_z;
+	float _pad4;
+	float _pad5;
+	uint max_vertices;
+	uint max_indices;
+	// Noise parameters
+	float frequency;
+	float amplitude;
+	float ridge_strength;
+	float warp_strength;
+	float detail_strength;
+	float base_offset;
+	float _pad6;
+	float _pad7;
+	float _pad8;
+	float _pad9;
+} params;
