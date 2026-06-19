@@ -32,8 +32,8 @@ var attribute_buffers: Array[RID] = []
 var index_buffers: Array[RID] = []
 var indirect_buffers: Array[RID] = []
 var uniform_sets: Array[RID] = []
-var max_vertex_counts: PackedInt32Array = []
-var max_index_counts: PackedInt32Array = []
+var surface_vertex_counts: PackedInt32Array = []
+var surface_index_counts: PackedInt32Array = []
 var elapsed_time := 0.0
 var current_case := 0
 var cases: Array[Dictionary] = []
@@ -313,8 +313,6 @@ func _switch_case(index: int) -> bool:
 	if mesh_rd == null:
 		return false
 	mesh_instance.mesh = mesh_rd
-	if not _bind_buffers():
-		return false
 	if not _create_uniforms():
 		return false
 	return true
@@ -330,16 +328,56 @@ func _create_mesh(c: Dictionary) -> MeshRD:
 		| Mesh.ARRAY_FORMAT_CUSTOM0
 	)
 	fmt |= int(Mesh.ARRAY_CUSTOM_RGB_FLOAT) << int(Mesh.ARRAY_FORMAT_CUSTOM0_SHIFT)
+	var vertex_buffer_size := vert_count * (
+		RenderingServer.mesh_surface_get_format_vertex_stride(fmt, vert_count)
+		+ RenderingServer.mesh_surface_get_format_normal_tangent_stride(fmt, vert_count)
+	)
+	var attribute_buffer_size := vert_count * RenderingServer.mesh_surface_get_format_attribute_stride(fmt, vert_count)
+	var index_format := RenderingDevice.INDEX_BUFFER_FORMAT_UINT16 if vert_count <= 65536 and vert_count > 0 else RenderingDevice.INDEX_BUFFER_FORMAT_UINT32
+
 	for surf in c["surfaces"]:
+		var vb := rd.vertex_buffer_create(vertex_buffer_size, PackedByteArray(), RenderingDevice.BUFFER_CREATION_AS_STORAGE_BIT)
+		if not vb.is_valid():
+			push_error("Failed to create vertex buffer.")
+			return null
+		vertex_buffers.append(vb)
+
+		var ab := rd.vertex_buffer_create(attribute_buffer_size, PackedByteArray(), RenderingDevice.BUFFER_CREATION_AS_STORAGE_BIT)
+		if not ab.is_valid():
+			push_error("Failed to create attribute buffer.")
+			return null
+		attribute_buffers.append(ab)
+
+		var ib := rd.index_buffer_create(idx_count, index_format, PackedByteArray(), false, RenderingDevice.BUFFER_CREATION_AS_STORAGE_BIT)
+		if not ib.is_valid():
+			push_error("Failed to create index buffer.")
+			return null
+		index_buffers.append(ib)
+
+		var ind := rd.storage_buffer_create(INDIRECT_CMD_SIZE, PackedByteArray(), RenderingDevice.STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT)
+		if not ind.is_valid():
+			push_error("Failed to create indirect buffer.")
+			return null
+		indirect_buffers.append(ind)
+
 		var aabb := _surface_aabb(c, surf)
 		var shader := RIBBON_SHADER if c["type"] == "ribbon" else SURFACE_SHADER
-		m.add_surface_storage(
-			fmt, Mesh.PRIMITIVE_TRIANGLES, vert_count, idx_count,
-			aabb, _create_material(surf["mat"], shader), Vector4(),
-			RenderingDevice.BUFFER_CREATION_AS_STORAGE_BIT,
-			RenderingDevice.BUFFER_CREATION_AS_STORAGE_BIT,
-			RenderingDevice.BUFFER_CREATION_AS_STORAGE_BIT,
+		m.add_surface(
+			fmt,
+			Mesh.PRIMITIVE_TRIANGLES,
+			vert_count,
+			vb,
+			ab,
+			idx_count,
+			ib,
+			aabb,
+			_create_material(surf["mat"], shader),
+			Vector4(),
+			ind,
 		)
+
+		surface_vertex_counts.append(vert_count)
+		surface_index_counts.append(idx_count)
 	m.set_custom_aabb(_mesh_aabb(c))
 	return m
 
@@ -431,8 +469,8 @@ func _build_push_constants(c: Dictionary, si: int) -> PackedByteArray:
 			pc.encode_u32(20, TERRAIN_RES)
 			pc.encode_float(32, snap_x)
 			pc.encode_float(36, snap_z)
-			pc.encode_u32(48, max_vertex_counts[si])
-			pc.encode_u32(52, max_index_counts[si])
+			pc.encode_u32(48, surface_vertex_counts[si])
+			pc.encode_u32(52, surface_index_counts[si])
 			pc.encode_float(56, terrain_params["frequency"])
 			pc.encode_float(60, terrain_params["amplitude"])
 			pc.encode_float(64, terrain_params["ridge_strength"])
@@ -445,8 +483,8 @@ func _build_push_constants(c: Dictionary, si: int) -> PackedByteArray:
 			pc.encode_float(8, surf.get("trail_length", 4.0))
 			pc.encode_u32(16, RIBBON_SEGMENTS)
 			pc.encode_u32(20, RIBBON_COUNT)
-			pc.encode_u32(24, max_vertex_counts[si])
-			pc.encode_u32(28, max_index_counts[si])
+			pc.encode_u32(24, surface_vertex_counts[si])
+			pc.encode_u32(28, surface_index_counts[si])
 			pc.encode_float(32, camera.global_position.x)
 			pc.encode_float(36, camera.global_position.y)
 			pc.encode_float(40, camera.global_position.z)
@@ -463,37 +501,9 @@ func _build_push_constants(c: Dictionary, si: int) -> PackedByteArray:
 			pc.encode_float(36, offset.y)
 			pc.encode_float(40, offset.z)
 			pc.encode_float(44, surf.get("phase", 0.0))
-			pc.encode_u32(48, max_vertex_counts[si])
-			pc.encode_u32(52, max_index_counts[si])
+			pc.encode_u32(48, surface_vertex_counts[si])
+			pc.encode_u32(52, surface_index_counts[si])
 	return pc
-
-
-func _bind_buffers() -> bool:
-	vertex_buffers.clear()
-	attribute_buffers.clear()
-	index_buffers.clear()
-	indirect_buffers.clear()
-	max_vertex_counts.clear()
-	max_index_counts.clear()
-	for si in range(mesh_rd.get_surface_count()):
-		var vb := mesh_rd.surface_get_vertex_buffer(si)
-		var ab := mesh_rd.surface_get_attribute_buffer(si)
-		var ib := mesh_rd.surface_get_index_buffer(si)
-		if not vb.is_valid() or not ab.is_valid() or not ib.is_valid():
-			push_error("Invalid buffers on surface %d." % si)
-			return false
-		var ind := rd.storage_buffer_create(INDIRECT_CMD_SIZE, PackedByteArray(), RenderingDevice.STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT)
-		if not ind.is_valid():
-			push_error("Failed to create indirect buffer for surface %d." % si)
-			return false
-		mesh_rd.surface_set_indirect_buffer(si, ind)
-		vertex_buffers.append(vb)
-		attribute_buffers.append(ab)
-		index_buffers.append(ib)
-		indirect_buffers.append(ind)
-		max_vertex_counts.append(mesh_rd.surface_get_max_vertex_count(si))
-		max_index_counts.append(mesh_rd.surface_get_max_index_count(si))
-	return not vertex_buffers.is_empty()
 
 
 func _create_uniforms() -> bool:
@@ -529,20 +539,31 @@ func _release_surface_resources() -> void:
 		for us in uniform_sets:
 			if us.is_valid():
 				rd.free_rid(us)
-	if mesh_rd != null:
-		for si in range(indirect_buffers.size()):
-			if indirect_buffers[si].is_valid():
-				mesh_rd.surface_set_indirect_buffer(si, RID())
 	if mesh_instance != null:
 		mesh_instance.mesh = null
 	mesh_rd = null
+
+	if rd != null:
+		for buf in vertex_buffers:
+			if buf.is_valid():
+				rd.free_rid(buf)
+		for buf in attribute_buffers:
+			if buf.is_valid():
+				rd.free_rid(buf)
+		for buf in index_buffers:
+			if buf.is_valid():
+				rd.free_rid(buf)
+		for buf in indirect_buffers:
+			if buf.is_valid():
+				rd.free_rid(buf)
+
 	uniform_sets.clear()
 	indirect_buffers.clear()
 	vertex_buffers.clear()
 	attribute_buffers.clear()
 	index_buffers.clear()
-	max_vertex_counts.clear()
-	max_index_counts.clear()
+	surface_vertex_counts.clear()
+	surface_index_counts.clear()
 
 
 func _cleanup() -> void:
